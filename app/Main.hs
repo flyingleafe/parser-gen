@@ -1,4 +1,5 @@
 {-# LANGUAGE UnicodeSyntax #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import Grammar
@@ -8,16 +9,20 @@ import Generator
 import System.Environment
 import System.IO
 import Data.Either.Combinators
+import Filesystem.Path
+import Filesystem.Path.CurrentOS
 
-generateParser ∷ String → Either String String
-generateParser input = do
-  (pgr, lgr) ← mapLeft show $ runLexer input >>= parseGrammarFile
+generateParser ∷ String → String → Either String String
+generateParser pname input = do
+  (header, stateData, pgr, lgr) ← mapLeft show $ runLexer input >>= parseGrammarFile
   (pgr', first, follow) ← processGrammar pgr
-  let config = GC { parserName = "Variables"
-                  , pGrammar  = pgr'
-                  , lGrammar  = lgr
-                  , gFIRST    = first
-                  , gFOLLOW   = follow
+  let config = GC { parserName   = pname
+                  , parserHeader = header
+                  , parserState  = stateData
+                  , pGrammar     = pgr'
+                  , lGrammar     = lgr
+                  , gFIRST       = first
+                  , gFOLLOW      = follow
                   }
   generateParserSource config
 
@@ -30,6 +35,6 @@ main = do
     let filename = head args
     file ← openFile filename ReadMode
     input ← hGetContents file
-    case generateParser input of
+    case generateParser (encodeString $ basename $ decodeString filename) input of
       Left err → putStrLn err
       Right res → putStrLn res

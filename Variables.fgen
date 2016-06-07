@@ -3,27 +3,24 @@ start
     | EPSILON
     ;
 typeDef
-    : IDENTIFIER varList SEMICOLON
+    : IDENTIFIER varList ';'
     ;
 varList
     : varDef varListCont
     ;
 varListCont
-    : COMMA varList
+    : ',' varList
     | EPSILON
     ;
 varDef
     : IDENTIFIER
-    | STAR varDef
+    | '*' varDef
     ;
 
 dummy
-    : COMMA SEMICOLON
-    | STAR
+    : ',' SEMICOLON
+    | '*'
     ;
 
 WHITESPACE : HIDDEN /[ \n\t]/ ;
 IDENTIFIER : /[a-zA-Z][a-zA-Z0-9_]*/ ;
-SEMICOLON : ';' ;
-COMMA : ',' ;
-STAR : '*' ;

@@ -22,6 +22,8 @@ library
                      , base-unicode-symbols
                      , mtl
                      , MissingH
+                     , regex-posix
+                     , regex-compat
   default-language:    Haskell2010
 
 executable parser-gen-exe
@@ -31,6 +33,7 @@ executable parser-gen-exe
   build-depends:       base
                      , parser-gen
                      , either
+                     , system-filepath
   default-language:    Haskell2010
 
 test-suite parser-gen-test

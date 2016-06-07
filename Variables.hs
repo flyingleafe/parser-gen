@@ -18,6 +18,6 @@ main = do
   case runLexer input of
     Nothing -> putStrLn "Lexer error"
     Just (mainch, _) -> do
-      case evalStateT parse_start mainch of
+      case evalStateT parse_start (VariablesParserInnerState mainch ()) of
         Left err -> putStrLn err
-        Right node -> putStrLn $ drawTree $ toTree node
+        Right (_, node) -> putStrLn $ drawTree $ toTree node

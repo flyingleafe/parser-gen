@@ -1,4 +1,5 @@
 {-# LANGUAGE UnicodeSyntax #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Generator
     ( GeneratorConfig(..)
     , generateParserSource
@@ -11,17 +12,22 @@ import Control.Monad.Writer
 import Prelude.Unicode
 import Data.List.Unicode
 import Data.Either.Utils
+import Data.Maybe
+import Data.Char (isSpace)
+import Text.Regex
 
 import Grammar
 import GrammarProcessing
 
 type GeneratorOutput = String
 data GeneratorConfig = GC
-    { parserName ∷ String
-    , pGrammar   ∷ ParserGrammar
-    , lGrammar   ∷ LexerGrammar
-    , gFIRST     ∷ GrammarTable
-    , gFOLLOW    ∷ GrammarTable
+    { parserName   ∷ String
+    , parserHeader ∷ String
+    , parserState  ∷ String
+    , pGrammar     ∷ ParserGrammar
+    , lGrammar     ∷ LexerGrammar
+    , gFIRST       ∷ GrammarTable
+    , gFOLLOW      ∷ GrammarTable
     }
 
 type Generator = ReaderT GeneratorConfig (WriterT GeneratorOutput (Either String))
@@ -29,6 +35,10 @@ type Generator = ReaderT GeneratorConfig (WriterT GeneratorOutput (Either String
 -- Utils
 tabulate ∷ Int → String → String
 tabulate n s = replicate n ' ' ++ s
+
+trim :: String -> String
+trim = f . f
+   where f = reverse . dropWhile isSpace
 
 -- Names generators
 tokenDatatypeName, tokenTypeDatatypeName, moduleName ∷ Generator String
@@ -42,6 +52,7 @@ moduleName = (++ "Parser") <$> asks parserName
 fileHeader ∷ Generator ()
 fileHeader = do
   mname ← moduleName
+  header ← asks parserHeader
   tell $ "module " ++ mname ++ " where\n\
 \\n\
 \import Data.List\n\
@@ -49,6 +60,7 @@ fileHeader = do
 \import Control.Monad.Trans\n\
 \import Control.Monad.Trans.State\n\
 \import Text.Regex.Posix\n"
+  tell header
 
 lexerDatatype ∷ Generator ()
 lexerDatatype = do
@@ -88,11 +100,31 @@ astDatatype = do
   pdn ← astDatatypeName
   tell $ "data " ++ pdn ++ " = " ++ pdn ++ "Nonterm String [" ++ pdn ++ "] | " ++ pdn ++ "Term String deriving Show\n"
 
+returnDataDatatype ∷ String → Generator String
+returnDataDatatype nt = do
+  pname ← asks parserName
+  return $ pname ++ "_" ++ nt ++ "Data"
+
+returnDataDatatypes ∷ Generator ()
+returnDataDatatypes = do
+  pgr ← asks pGrammar
+  let nts = M.keys pgr
+
+  forM_ nts $ \nt → do
+    curData ← returnDataDatatype nt
+    let curValues = concatMap returnVals $ maybeToList $ M.lookup nt pgr
+        curValues' = map (\(p, t) → nt ++ "_" ++ p ++ " :: " ++ t) curValues
+        dataSet   = if length curValues' ≡ 0 then "" else " { " ++ (intercalate ", " curValues') ++ " }"
+    tell $ "data " ++ curData ++ " = " ++ curData ++ dataSet ++ "\n"
+
 parserType ∷ Generator ()
 parserType = do
   ptn ← parserTypeName
   tdn ← tokenDatatypeName
-  tell $ "type " ++ ptn ++ " = StateT [" ++ tdn ++ "] (Either String)\n"
+  sdata ← asks parserState
+  let sdn = ptn ++ "InnerState"
+  tell $ "data " ++ sdn ++ " = " ++ sdn ++ " { _input :: [" ++ tdn ++ "], " ++ sdata ++ "}\n"
+  tell $ "type " ++ ptn ++ " = StateT " ++ sdn ++ " (Either String)\n"
 
 -- Generators of parsers
 parserFunctions ∷ Generator ()
@@ -101,14 +133,14 @@ parserFunctions = do
   tdn ← tokenDatatypeName
   ttdn ← tokenTypeDatatypeName
   tell $ "curToken :: " ++ ptn ++ " " ++ tdn ++ "\n"
-  tell $ "curToken = gets head\n\n"
+  tell $ "curToken = gets (head . _input)\n\n"
   tell $ "consumeToken :: " ++ ttdn ++ " -> " ++ ptn ++ " " ++ tdn ++ "\n"
   tell $ "consumeToken ttype = do { ct <- curToken; if type' ct /= ttype then "
   tell $ "lift $ Left (\"Expected \" ++ show ttype ++ \" but found \" ++ show ct) else "
-  tell $ "modify tail >> return ct; }\n"
+  tell $ "modify (\\st -> st { _input = tail (_input st)}) >> return ct; }\n"
 
-getRules ∷ NonterminalId → Generator [GrammarCombination]
-getRules nt = do
+getRule ∷ NonterminalId → Generator ParserRule
+getRule nt = do
   pgr ← asks pGrammar
   let errStr = "Nonterminal `" ++ nt ++ "` is not found in grammar"
   maybeToEither errStr $ M.lookup nt pgr
@@ -122,14 +154,21 @@ parserMainCaseSwitch nonterm = do
   first  ← asks gFIRST
   follow ← asks (flip getList nonterm ∘ gFOLLOW)
   -- pgr    ← asks pGrammar
-  rules  ← getRules nonterm
+  prule  ← getRule nonterm
+  addDataType ← returnDataDatatype nonterm
 
   let fname = "parse_" ++ nonterm
-  tell $ fname ++ " :: " ++ ptn ++ " " ++ atn ++ "\n"
+      rules = combs prule
+      retVals = returnVals prule
+      addDataAssigns = map (\(p, _) → nonterm ++ "_" ++ p ++ " = _" ++ p) retVals
+      addDataSet = if length retVals ≢ 0 then " { " ++ intercalate ", " addDataAssigns ++ " }" else ""
+      retDataStruct = addDataType ++ addDataSet
+
+  tell $ fname ++ " :: " ++ ptn ++ " (" ++ addDataType ++ ", " ++ atn ++ ")\n"
   tell $ fname ++ " = do\n"
   tell $ "    curt <- curToken\n"
-  tell $ "    children <- switchCase curt\n"
-  tell $ "    return $ " ++ atn ++ "Nonterm \"" ++ nonterm ++ "\" children\n"
+  tell $ "    (addData, children) <- switchCase curt\n"
+  tell $ "    return (addData, " ++ atn ++ "Nonterm \"" ++ nonterm ++ "\" children)\n"
   tell $ "  where switchCase curt\n"
 
   forM_ rules $ \rule → do
@@ -137,23 +176,43 @@ parserMainCaseSwitch nonterm = do
     if length lexemes ≡ 0 then return ()
     else do
       let constrs = map (getTokenTypeConstructor pname) lexemes
-      tell $ tabulate 12 $ "| type' curt `elem` [" ++ (intercalate ", " constrs) ++ "] = sequence ["
+      tell $ tabulate 12 $ "| type' curt `elem` [" ++ (intercalate ", " constrs) ++ "] = do\n"
 
-      let actionSequence = map makeAction rule
-          makeAction (Nonterminal nt) = "parse_" ++ nt
-          makeAction (Terminal lid) = let constr = getTokenTypeConstructor pname lid
-                                      in "consumeToken " ++ constr ++ " >>= return . " ++ atn ++ "Term . text"
+      let enumeratedRules = zip [0..] rule
+          actionSequence = map makeAction enumeratedRules
+          makeAction (i, (Nonterminal nt)) = "(_" ++ nt ++ ", _node" ++ show i ++ ") <- parse_" ++ nt ++ "\n"
+          makeAction (i, (Terminal lid)) = let constr = getTokenTypeConstructor pname lid
+                                           in "(_" ++ lid ++ "_text, _node" ++ show i ++ ") <- do { "
+                                                  ++ "tok <- consumeToken " ++ constr ++ "; return (text tok, " ++ atn ++ "Term (text tok)) }\n"
+          makeAction (_, (Action s)) = trim (prepareCode s) ++ "\n"
+          returnNodesList = map (\(i, _) → "_node" ++ show i) $ filter (not ∘ isAction ∘ snd) enumeratedRules
 
-      tell $ (intercalate ", " actionSequence) ++ "]\n"
+      forM_ (map (tabulate 16) actionSequence) tell
 
-  let hasEpsilon = any (\rule → "EPSILON" ∈ getFIRST first rule) rules
-  if hasEpsilon ∧ length follow ≢ 0 then do
-    let constrs = map (getTokenTypeConstructor pname) follow
-    tell $ tabulate 12 "| type' curt `elem` [" ++ (intercalate ", " constrs) ++ "]"
-    tell $ " = return [" ++ atn ++ "Term \"EPSILON\"]\n"
-  else return ()
+      tell $ tabulate 16 $ "return (" ++ retDataStruct ++ ", [" ++ intercalate ", " returnNodesList ++ "])\n"
 
-  tell $ tabulate 12 "| otherwise = lift $ Left \"unexpected char\"\n"
+  let epsilonPredicate rule = "EPSILON" ∈ getFIRST first rule
+      firstEpsRule = find epsilonPredicate rules
+  case firstEpsRule of
+    Just rule → do
+      let constrs = map (getTokenTypeConstructor pname) follow
+          actions = filter isAction rule
+
+      tell $ tabulate 12 "| type' curt `elem` [" ++ (intercalate ", " constrs) ++ "] = do\n"
+      forM_ actions $ \(Action s) → tell $ tabulate 16 $ trim (prepareCode s) ++ "\n"
+      tell $ tabulate 16 $ "return (" ++ retDataStruct ++ ", [" ++ atn ++ "Term \"EPSILON\"])\n"
+    Nothing → return ()
+
+  tell $ tabulate 12 "| otherwise = lift $ Left (\"unexpected char `\" ++ show curt ++ \"`\")\n"
+
+prepareCode ∷ String → String
+prepareCode = replaceTokenVars ∘ replaceOwnVars ∘ replaceChildVars
+    where ownVarRegexp       = mkRegex "\\$([a-z][a-zA-Z0-9_]*)"
+          replaceOwnVars s   = subRegex ownVarRegexp s "_\\1"
+          childVarRegexp     = mkRegex "\\$([a-z][a-zA-Z0-9_]*)\\.([a-z][a-zA-Z0-9_]*)"
+          replaceChildVars s = subRegex childVarRegexp s "(\\1_\\2 _\\1)"
+          tokenVarsRegexp    = mkRegex "\\$([A-Z][a-zA-Z0-9_]*)\\.([a-z][a-zA-Z0-9_]*)"
+          replaceTokenVars s = subRegex tokenVarsRegexp s "_\\1_\\2"
 
 allCaseSwitches ∷ Generator ()
 allCaseSwitches = do
@@ -262,6 +321,7 @@ allSource = sequence_ $ intersperse (tell "\n")
   , tokenShowInstance
   , tokenTypeShowInstance
   , astDatatype
+  , returnDataDatatypes
   , parserType
   , parserFunctions
   , lexerFunction

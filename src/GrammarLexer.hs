@@ -15,11 +15,18 @@ import Text.Parsec.Pos (SourcePos)
 
 data GrammarLexeme = NonTerm String
                    | Term String
+                   | Typename String
                    | StringLiteral String
                    | RegexLiteral String
+                   | CodeBlock String
                    | Colon
                    | Semicolon
+                   | Comma
                    | Divider
+                   | ReturnArrow
+                   | DoubleColon
+                   | LeftSquare
+                   | RightSquare
                      deriving Eq
 
 instance Show GrammarLexeme where
@@ -27,9 +34,19 @@ instance Show GrammarLexeme where
     show (Term s) = s
     show (StringLiteral s) = s
     show (RegexLiteral s) = s
+    show (CodeBlock s) = s
     show Colon = ":"
     show Semicolon = ";"
+    show Comma = ","
     show Divider = "|"
+    show ReturnArrow = "->"
+    show DoubleColon = "::"
+    show LeftSquare = "["
+    show RightSquare = "]"
+
+instance Monoid a => Monoid (ParsecT s u m a) where
+    mappend a b = mappend <$> a <*> b
+    mempty = return mempty
 
 skipSpaces :: Parser a -> Parser a
 skipSpaces p = p <* spaces
@@ -41,22 +58,30 @@ parsePos :: Parser a -> Parser (SourcePos, a)
 parsePos p = (,) <$> getPosition <*> p
 
 tokenize :: Parser [(SourcePos, GrammarLexeme)]
-tokenize = spaces *> many1 (skipSpaces $ parsePos grammarLexeme)
+tokenize = spaces *> many1 (parsePos grammarLexeme) <* eof
 
 grammarLexeme :: Parser GrammarLexeme
-grammarLexeme = try nonTerm
-                <|> try term
-                <|> try stringLiteral
-                <|> try regexLiteral
-                <|> try colon
-                <|> try semicolon
-                <|> divider
+grammarLexeme = choice $ map (try . skipSpaces)
+                [ nonTerm
+                , term
+                , stringLiteral
+                , regexLiteral
+                , codeBlock
+                , dcolon
+                , semicolon
+                , comma
+                , divider
+                , arrow
+                , lsq
+                , rsq
+                , colon
+                ]
 
 nonTerm :: Parser GrammarLexeme
 nonTerm = NonTerm <$> ((:) <$> lower <*> many (try alphaNum <|> char '_'))
 
 term :: Parser GrammarLexeme
-term = Term <$> many1 (try upper <|> char '_')
+term = Term <$> ((:) <$> upper <*> many (try alphaNum <|> char '_'))
 
 stringLiteral :: Parser GrammarLexeme
 stringLiteral = StringLiteral <$> surround (char '\'') (escapedString "'")
@@ -64,10 +89,22 @@ stringLiteral = StringLiteral <$> surround (char '\'') (escapedString "'")
 regexLiteral :: Parser GrammarLexeme
 regexLiteral = RegexLiteral <$> surround (char '/') (escapedString "/")
 
-colon, semicolon, divider :: Parser GrammarLexeme
+codeBlock :: Parser GrammarLexeme
+codeBlock = CodeBlock <$> (char '{' *> bracesText <* char '}')
+
+bracesText :: Parser String
+bracesText = noBrace <> (concat <$> many (string "{" <> noBrace <> string "}" <> noBrace))
+    where noBrace = many (noneOf "{}")
+
+colon, semicolon, comma, divider, arrow, rsq, lsq, dcolon :: Parser GrammarLexeme
 colon     = char ':' *> pure Colon
 semicolon = char ';' *> pure Semicolon
+comma     = char ',' *> pure Comma
 divider   = char '|' *> pure Divider
+lsq       = char '[' *> pure LeftSquare
+rsq       = char ']' *> pure RightSquare
+arrow     = string "->" *> pure ReturnArrow
+dcolon    = string "::" *> pure DoubleColon
 
 escapedChar :: String -> Parser Char
 escapedChar s = char '\\' *> oneOf ('\\' : s)

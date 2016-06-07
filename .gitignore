@@ -2,4 +2,5 @@
 *.o
 *.hi
 variables
-VariablesParser.hs
+expressions
+*Parser.hs

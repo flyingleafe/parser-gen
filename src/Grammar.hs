@@ -2,6 +2,7 @@ module Grammar
     ( NonterminalId
     , LexemeId
     , ParserGrammar
+    , ParserRule(..)
     , GrammarCombination
     , GrammarTerm(..)
     , LexerGrammar
@@ -10,35 +11,48 @@ module Grammar
     , parseGrammarFile
     , isTerminal
     , isNonterminal
+    , isAction
     , termName
     ) where
 
 import qualified Data.Map.Lazy as M
-import Text.Parsec.Prim
+import Text.Parsec.Prim hiding (State)
 import Text.Parsec.Pos (SourcePos)
 import Text.Parsec.Combinator
 import Text.Parsec.Error (ParseError)
+import Control.Monad.State
+import Data.Maybe
 
 import GrammarLexer
 
-type Parser = Parsec [(SourcePos, GrammarLexeme)] ()
+type Parser = ParsecT [(SourcePos, GrammarLexeme)] () (State (M.Map String String))
 
 type NonterminalId = String
-type ParserGrammar = M.Map NonterminalId [GrammarCombination]
+type ParserGrammar = M.Map NonterminalId ParserRule
+
+data ParserRule = ParserRule { returnVals :: [(String, String)]
+                             , combs :: [GrammarCombination]
+                             } deriving (Show, Eq)
+
 type GrammarCombination = [GrammarTerm]
 
 data GrammarTerm = Nonterminal NonterminalId
                  | Terminal LexemeId
+                 | Action String
                    deriving (Show, Eq)
 
-isTerminal, isNonterminal :: GrammarTerm -> Bool
+isTerminal, isNonterminal, isAction :: GrammarTerm -> Bool
 isTerminal (Terminal _) = True
 isTerminal _ = False
-isNonterminal = not . isTerminal
+isNonterminal (Nonterminal _) = True
+isNonterminal _ = False
+isAction (Action _) = True
+isAction _ = False
 
 termName :: GrammarTerm -> String
 termName (Nonterminal s) = s
 termName (Terminal s) = s
+termName (Action s) = s
 
 type LexemeId = String
 type LexerGrammar = M.Map LexemeId AnnotatedLexeme
@@ -52,19 +66,27 @@ data Lexeme = StringToken String
               deriving (Show, Eq)
 
 -- Common things for grammar tokens recognition
-tokenIf :: Show a => (a -> Bool) -> Parsec [(SourcePos, a)] u a
-tokenIf cond = token show fst (\(pos, t) -> if cond t then Just t else Nothing)
+tokenIf :: (GrammarLexeme -> Bool) -> Parser GrammarLexeme
+tokenIf cond = tokenPrim show (\_ t _  -> fst t) (\(_, t) -> if cond t then Just t else Nothing)
 
-colon, semicolon, divider, nonTerm, term, stringLiteral, regexLiteral :: Parser GrammarLexeme
+colon, semicolon, divider, nonTerm, term, codeBlock, stringLiteral, regexLiteral :: Parser GrammarLexeme
 colon     = tokenIf (== Colon)
 semicolon = tokenIf (== Semicolon)
 divider   = tokenIf (== Divider)
+comma     = tokenIf (== Comma)
+arrow     = tokenIf (== ReturnArrow)
+dcolon    = tokenIf (== DoubleColon)
+lsq       = tokenIf (== LeftSquare)
+rsq       = tokenIf (== RightSquare)
 nonTerm   = tokenIf isNonTerm
     where isNonTerm (NonTerm _) = True
           isNonTerm _ = False
 term = tokenIf isTerm
     where isTerm (Term _) = True
           isTerm _ = False
+codeBlock = tokenIf isCodeBlock
+    where isCodeBlock (CodeBlock _) = True
+          isCodeBlock _ = False
 stringLiteral = tokenIf isStringLiteral
     where isStringLiteral (StringLiteral _) = True
           isStringLiteral _ = False
@@ -72,33 +94,69 @@ regexLiteral = tokenIf isRegexLiteral
     where isRegexLiteral (RegexLiteral _) = True
           isRegexLiteral _ = False
 
-nonterminalId, lexemeId, stringToken, regexToken :: Parser String
+nonterminalId, lexemeId, codeBlockStr, stringToken, regexToken :: Parser String
 nonterminalId = show <$> nonTerm
 lexemeId      = show <$> term
+codeBlockStr  = show <$> codeBlock
 stringToken   = show <$> stringLiteral
 regexToken    = show <$> regexLiteral
 
+-- Parse header
+parserHeader :: Parser String
+parserHeader = try (tokenIf (== NonTerm "header") *> codeBlockStr)
+                <|> return ""
+
+parserStateData :: Parser String
+parserStateData = try (tokenIf (== NonTerm "stateData") *> codeBlockStr)
+                  <|> return "_dummy :: ()"
 
 -- Grammar for parser
 parserGrammar :: Parser ParserGrammar
 parserGrammar = M.fromList <$> many1 parserRule
 
-parserRule :: Parser (NonterminalId, [GrammarCombination])
+parserRule :: Parser (NonterminalId, ParserRule)
 parserRule = do
-  nid  <- nonterminalId <* colon
+  nid  <- nonterminalId
+  retvals <- retValsList <* colon
   alts <- sepBy1 grammarCombination divider <* semicolon
-  return (nid, alts)
+  return (nid, ParserRule retvals alts)
+
+retValsList :: Parser [(String, String)]
+retValsList = try (arrow *> lsq *> many retVal <* rsq)
+              <|> return []
+
+retVal :: Parser (String, String)
+retVal = (,) <$> (nonterminalId <* dcolon) <*> lexemeId
 
 grammarCombination :: Parser GrammarCombination
 grammarCombination = many1 grammarTerm
 
 grammarTerm :: Parser GrammarTerm
 grammarTerm = try (Nonterminal <$> nonterminalId)
-              <|> (Terminal <$> lexemeId)
+              <|> try (Terminal <$> lexemeId)
+              <|> try inlineTerminal
+              <|> Action <$> codeBlockStr
+
+inlineTerminal :: Parser GrammarTerm
+inlineTerminal = do
+  (StringLiteral s) <- stringLiteral
+  newLit <- gets (M.notMember s)
+  msize  <- gets M.size
+  tokName <- if newLit
+             then do
+               let tname = "inttok" ++ show msize
+               modify $ M.insert s tname
+               return tname
+             else gets $ fromJust . M.lookup s
+  return $ Terminal tokName
 
 -- Grammar for lexer
 lexerGrammar :: Parser LexerGrammar
-lexerGrammar = M.fromList <$> many1 lexerRule
+lexerGrammar = do
+  explicitGrammar <- M.fromList <$> many1 lexerRule
+  stmap <- get
+  let implicitGrammar = M.fromList [(key, ChannelMain (StringToken val)) | (val, key) <- M.toList stmap]
+  return $ M.union explicitGrammar implicitGrammar
 
 lexerRule :: Parser (LexemeId, AnnotatedLexeme)
 lexerRule = do
@@ -117,9 +175,11 @@ lexeme :: Parser Lexeme
 lexeme = try (StringToken <$> stringToken)
          <|> (RegexToken <$> regexToken)
 
-parseGrammarFile :: [(SourcePos, GrammarLexeme)] -> Either ParseError (ParserGrammar, LexerGrammar)
-parseGrammarFile = parse parseBoth ""
+parseGrammarFile :: [(SourcePos, GrammarLexeme)] -> Either ParseError (String, String, ParserGrammar, LexerGrammar)
+parseGrammarFile tokstream = evalState (runParserT parseBoth () "" tokstream) M.empty
     where parseBoth = do
+            header <- parserHeader
+            stateData <- parserStateData
             pg <- parserGrammar
             lg <- lexerGrammar
-            return (pg, lg)
+            return (header, stateData, pg, lg)

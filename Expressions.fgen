@@ -1,0 +1,25 @@
+start -> [val :: Int]
+    : summand sumRest { let $val = $summand.val + $sumRest.val  }
+    ;
+
+sumRest -> [val :: Int]
+    : '+' summand sumRest { let $val = $summand.val + $sumRest.val }
+    | EPSILON { let $val = 0 }
+    ;
+
+summand -> [val :: Int]
+    : factor multRest { let $val = $factor.val * $multRest.val }
+    ;
+
+multRest -> [val :: Int]
+    : '*' factor multRest { let $val = $factor.val * $multRest.val }
+    | EPSILON { let $val = 1 }
+    ;
+
+factor -> [val :: Int]
+    : NUMBER { let $val = read $NUMBER.text :: Int }
+    | '(' start ')' { let $val = $start.val }
+    ;
+    
+NUMBER : /[0-9]+/ ;
+WHITESPACE : HIDDEN /[ \n\t]/ ; 
