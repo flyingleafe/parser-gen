@@ -45,7 +45,9 @@ fileHeader = do
   tell $ "module " ++ mname ++ " where\n\
 \\n\
 \import Data.List\n\
-\import Control.Monad.State.Lazy\n\
+\import Data.Ord\n\
+\import Control.Monad.Trans\n\
+\import Control.Monad.Trans.State\n\
 \import Text.Regex.Posix\n"
 
 lexerDatatype ∷ Generator ()
@@ -84,7 +86,7 @@ getTokenTypeConstructor name id = name ++ "Lexer_" ++ if id ≡ "$" then "EOF" e
 astDatatype ∷ Generator ()
 astDatatype = do
   pdn ← astDatatypeName
-  tell $ "data " ++ pdn ++ " = " ++ pdn ++ "Nonterm String [" ++ pdn ++ "] | " ++ pdn ++ "Term String\n"
+  tell $ "data " ++ pdn ++ " = " ++ pdn ++ "Nonterm String [" ++ pdn ++ "] | " ++ pdn ++ "Term String deriving Show\n"
 
 parserType ∷ Generator ()
 parserType = do
@@ -102,7 +104,7 @@ parserFunctions = do
   tell $ "curToken = gets head\n\n"
   tell $ "consumeToken :: " ++ ttdn ++ " -> " ++ ptn ++ " " ++ tdn ++ "\n"
   tell $ "consumeToken ttype = do { ct <- curToken; if type' ct /= ttype then "
-  tell $ "fail (\"Expected \" ++ show ttype ++ \" but found \" ++ show ct) else "
+  tell $ "lift $ Left (\"Expected \" ++ show ttype ++ \" but found \" ++ show ct) else "
   tell $ "modify tail >> return ct; }\n"
 
 getRules ∷ NonterminalId → Generator [GrammarCombination]
@@ -151,7 +153,7 @@ parserMainCaseSwitch nonterm = do
     tell $ " = return [" ++ atn ++ "Term \"EPSILON\"]\n"
   else return ()
 
-  tell $ tabulate 12 "| otherwise = fail \"unexpected char\"\n"
+  tell $ tabulate 12 "| otherwise = lift $ Left \"unexpected char\"\n"
 
 allCaseSwitches ∷ Generator ()
 allCaseSwitches = do
@@ -162,14 +164,96 @@ lexerFunction ∷ Generator ()
 lexerFunction = do
   pname ← asks parserName
   tdn   ← tokenDatatypeName
+  tell $ "maybeLength :: Maybe " ++ tdn ++ " -> Int\n"
+  tell $ "maybeLength Nothing = 0\n"
+  tell $ "maybeLength (Just tok) = length (text tok)\n"
+  tell $ "\n"
+  tell $ "getLongest :: [Maybe " ++ tdn ++ "] -> Maybe " ++ tdn ++ "\n"
+  tell $ "getLongest = maximumBy (comparing maybeLength)\n"
+  tell $ "\n"
   tell $ "runLexer :: String -> Maybe ([" ++ tdn ++ "], [" ++ tdn ++ "])\n"
   tell $ "runLexer [] = Just ([" ++ tdn ++ " \"$\" " ++ getTokenTypeConstructor pname "$" ++ "], [])\n"
-  tell $ "runLexer s = do"
-  tell $ "    let strMatch = getLongest (matchStr s)"
-  tell $ "        regexMatch = getLongest (matchRegex s)"
-  tell $ "        hiddenMatch = "
-  tell $ "    "
+  tell $ "runLexer s = do\n"
+  tell $ "  case hiddenMatch s of\n"
+  tell $ "    Just tok -> do { (main, hid) <- runLexer (drop (length (text tok)) s); return (main, tok : hid) }\n"
+  tell $ "    Nothing -> do\n"
+  tell $ "      longest <- getLongest (matchStr s ++ matchRegex s)\n"
+  tell $ "      (main, hid) <- runLexer (drop (length (text longest)) s)\n"
+  tell $ "      return (longest : main, hid)\n"
+  tell $ "\n"
+  tell $ "matchStr :: String -> [Maybe " ++ tdn ++ "]\n"
+  tell $ "matchStr s = [ "
 
+  lgr ← asks lGrammar
+  let mainStrToks = takeStrTokens $ takeMain lgr
+      matchings   = map makeStrMatch mainStrToks
+
+      makeStrMatch (lid, str) = "stripPrefix \"" ++ str ++ "\" s >> return (" ++
+                                tdn ++ " \"" ++ str ++  "\" " ++ getTokenTypeConstructor pname lid ++ ")"
+
+  tell $ intercalate "\n             , " matchings
+  tell $ "\n             ]\n\n"
+
+  tell $ "matchRegex :: String -> [Maybe " ++ tdn ++ "]\n"
+  tell $ "matchRegex s = [ "
+
+  let mainRegexToks = takeRegexTokens $ takeMain lgr
+      matchings     = map makeRegexMatch mainRegexToks
+      makeRegexMatch (lid, rgx) = "let (b, m, _) = s =~ \"" ++ rgx ++ "\" :: (String, String, String) in " ++
+                                  "if length b /= 0 then Nothing else Just (" ++
+                                  tdn ++ " m " ++ getTokenTypeConstructor pname lid ++ ")"
+
+  tell $ intercalate "\n               , " matchings
+  tell $ "\n               ]\n\n"
+
+  tell $ "hiddenMatch :: String -> Maybe " ++ tdn ++ "\n"
+  tell $ "hiddenMatch s = getLongest (hiddenMatchStr s ++ hiddenMatchRegex s)\n\n"
+  tell $ "hiddenMatchStr :: String -> [Maybe " ++ tdn ++ "]\n"
+  tell $ "hiddenMatchStr s = [ "
+
+  let hiddenStrToks = takeStrTokens $ takeHidden lgr
+      matchings     = map makeStrMatch hiddenStrToks
+
+  tell $ intercalate "\n                   , " matchings
+  tell $ "\n                   ]\n\n"
+
+  tell $ "hiddenMatchRegex :: String -> [Maybe " ++ tdn ++ "]\n"
+  tell $ "hiddenMatchRegex s = [ "
+
+  let hiddenRegexToks = takeRegexTokens $ takeHidden lgr
+      matchings     = map makeRegexMatch hiddenRegexToks
+
+  tell $ intercalate "\n                     , " matchings
+  tell $ "\n                     ]\n"
+
+
+unwrapChan ∷ (LexemeId, AnnotatedLexeme) → (LexemeId, Lexeme)
+unwrapChan (lid, ChannelMain lex) = (lid, lex)
+unwrapChan (lid, ChannelHidden lex) = (lid, lex)
+
+unwrapLexeme ∷ (LexemeId, Lexeme) → (LexemeId, String)
+unwrapLexeme (lid, StringToken s) = (lid, s)
+unwrapLexeme (lid, RegexToken s) = (lid, s)
+
+takeMain ∷ LexerGrammar → [(LexemeId, Lexeme)]
+takeMain lgr = map unwrapChan $ filter isMain $ M.toList lgr
+    where isMain (_, ChannelMain _) = True
+          isMain _ = False
+
+takeHidden ∷ LexerGrammar → [(LexemeId, Lexeme)]
+takeHidden lgr = map unwrapChan $ filter isHidden $ M.toList lgr
+    where isHidden (_, ChannelHidden _) = True
+          isHidden _ = False
+
+takeStrTokens ∷ [(LexemeId, Lexeme)] → [(LexemeId, String)]
+takeStrTokens = map unwrapLexeme ∘ filter isStrTok
+    where isStrTok (_, StringToken _) = True
+          isStrTok _ = False
+
+takeRegexTokens ∷ [(LexemeId, Lexeme)] → [(LexemeId, String)]
+takeRegexTokens = map unwrapLexeme ∘ filter isRegTok
+    where isRegTok (_, RegexToken _) = True
+          isRegTok _ = False
 
 allSource ∷ Generator ()
 allSource = sequence_ $ intersperse (tell "\n")
@@ -180,6 +264,7 @@ allSource = sequence_ $ intersperse (tell "\n")
   , astDatatype
   , parserType
   , parserFunctions
+  , lexerFunction
   , allCaseSwitches
   ]
 

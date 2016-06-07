@@ -5,6 +5,7 @@ module Grammar
     , GrammarCombination
     , GrammarTerm(..)
     , LexerGrammar
+    , AnnotatedLexeme(..)
     , Lexeme(..)
     , parseGrammarFile
     , isTerminal
