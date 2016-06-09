@@ -1,3 +1,4 @@
+// Parser 
 start
     : typeDef start
     | EPSILON
@@ -22,5 +23,6 @@ dummy
     | '*'
     ;
 
+// Lexer
 WHITESPACE : HIDDEN /[ \n\t]/ ;
 IDENTIFIER : /[a-zA-Z][a-zA-Z0-9_]*/ ;

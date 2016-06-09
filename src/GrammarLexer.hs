@@ -19,6 +19,7 @@ data GrammarLexeme = NonTerm String
                    | StringLiteral String
                    | RegexLiteral String
                    | CodeBlock String
+                   | ParamsBlock String
                    | Colon
                    | Semicolon
                    | Comma
@@ -35,6 +36,7 @@ instance Show GrammarLexeme where
     show (StringLiteral s) = s
     show (RegexLiteral s) = s
     show (CodeBlock s) = s
+    show (ParamsBlock s) = s
     show Colon = ":"
     show Semicolon = ";"
     show Comma = ","
@@ -67,6 +69,7 @@ grammarLexeme = choice $ map (try . skipSpaces)
                 , stringLiteral
                 , regexLiteral
                 , codeBlock
+                , paramsBlock
                 , dcolon
                 , semicolon
                 , comma
@@ -75,7 +78,11 @@ grammarLexeme = choice $ map (try . skipSpaces)
                 , lsq
                 , rsq
                 , colon
+                , lineComment
                 ]
+
+lineComment :: Parser GrammarLexeme
+lineComment = string "//" *> many (noneOf "\r\n") *> spaces *> grammarLexeme
 
 nonTerm :: Parser GrammarLexeme
 nonTerm = NonTerm <$> ((:) <$> lower <*> many (try alphaNum <|> char '_'))
@@ -87,14 +94,17 @@ stringLiteral :: Parser GrammarLexeme
 stringLiteral = StringLiteral <$> surround (char '\'') (escapedString "'")
 
 regexLiteral :: Parser GrammarLexeme
-regexLiteral = RegexLiteral <$> surround (char '/') (escapedString "/")
+regexLiteral = RegexLiteral <$> surround (char '/') (escapedString1 "/")
 
 codeBlock :: Parser GrammarLexeme
-codeBlock = CodeBlock <$> (char '{' *> bracesText <* char '}')
+codeBlock = CodeBlock <$> (char '{' *> bracesText "{" "}" <* char '}')
 
-bracesText :: Parser String
-bracesText = noBrace <> (concat <$> many (string "{" <> noBrace <> string "}" <> noBrace))
-    where noBrace = many (noneOf "{}")
+paramsBlock :: Parser GrammarLexeme
+paramsBlock = ParamsBlock <$> (char '(' *> bracesText "(" ")" <* char ')')
+
+bracesText :: String -> String -> Parser String
+bracesText lb rb = noBrace <> (concat <$> many (string lb <> bracesText lb rb <> string rb <> noBrace))
+    where noBrace = many (noneOf (lb ++ rb))
 
 colon, semicolon, comma, divider, arrow, rsq, lsq, dcolon :: Parser GrammarLexeme
 colon     = char ':' *> pure Colon
@@ -107,10 +117,12 @@ arrow     = string "->" *> pure ReturnArrow
 dcolon    = string "::" *> pure DoubleColon
 
 escapedChar :: String -> Parser Char
-escapedChar s = char '\\' *> oneOf ('\\' : s)
+escapedChar s = try (char '\\' *> oneOf ('\\' : s))
+                <|> char '\\'
 
-escapedString :: String -> Parser String
-escapedString s = many (noneOf s <|> escapedChar s)
+escapedString, escapedString1 :: String -> Parser String
+escapedString s  = many (noneOf ('\\' : s) <|> escapedChar s)
+escapedString1 s = many1 (noneOf ('\\' : s) <|> escapedChar s)
 
 runLexer :: String -> Either ParseError [(SourcePos, GrammarLexeme)]
 runLexer = parse tokenize ""

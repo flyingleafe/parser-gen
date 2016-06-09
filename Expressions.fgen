@@ -1,3 +1,10 @@
+header {
+numFromToken :: ExpressionsLexerToken -> Int
+numFromToken = read . text
+}
+
+// Parser
+
 start -> [val :: Int]
     : summand sumRest { let $val = $summand.val + $sumRest.val  }
     ;
@@ -17,9 +24,11 @@ multRest -> [val :: Int]
     ;
 
 factor -> [val :: Int]
-    : NUMBER { let $val = read $NUMBER.text :: Int }
+    : NUMBER { let $val = numFromToken $NUMBER }
     | '(' start ')' { let $val = $start.val }
     ;
     
+// Lexer
+
 NUMBER : /[0-9]+/ ;
 WHITESPACE : HIDDEN /[ \n\t]/ ; 

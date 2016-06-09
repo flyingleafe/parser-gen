@@ -11,6 +11,7 @@ import Control.Monad.Reader
 import Control.Monad.Writer
 import Prelude.Unicode
 import Data.List.Unicode
+import Data.List.Split
 import Data.Either.Utils
 import Data.Maybe
 import Data.Char (isSpace)
@@ -24,6 +25,7 @@ data GeneratorConfig = GC
     { parserName   ∷ String
     , parserHeader ∷ String
     , parserState  ∷ String
+    , parserCustom ∷ String
     , pGrammar     ∷ ParserGrammar
     , lGrammar     ∷ LexerGrammar
     , gFIRST       ∷ GrammarTable
@@ -55,6 +57,7 @@ fileHeader = do
   header ← asks parserHeader
   tell $ "module " ++ mname ++ " where\n\
 \\n\
+\import Debug.Trace\n\
 \import Data.List\n\
 \import Data.Ord\n\
 \import Control.Monad.Trans\n\
@@ -67,16 +70,18 @@ lexerDatatype = do
   tdn  ← tokenDatatypeName
   ttdn ← tokenTypeDatatypeName
   css  ← tokenTypeConstructors
-  tell $ "data " ++ tdn ++ " = " ++ tdn ++ " { text :: String, type' :: " ++ ttdn ++ " }\n"
+  tell $ "data " ++ tdn ++ " = " ++ tdn ++ " { text :: String, _index :: Int, type' :: " ++ ttdn ++ " }\n"
   tell $ "data " ++ ttdn ++ " = "
-  tell $ concat (intersperse " | " $ map snd css)
-  tell $ " deriving Eq\n"
+  tell $ concat (intersperse ("\n" ++ tabulate (length ttdn + 5) " | ") $ map snd css)
+  tell $ "\n" ++ tabulate (length ttdn + 8) "deriving Eq\n"
 
 tokenShowInstance ∷ Generator ()
 tokenShowInstance = do
   tdn ← tokenDatatypeName
+  pname ← asks parserName
+  let eofTypeName = getTokenTypeConstructor pname "EOF"
   tell $ "instance Show " ++ tdn ++ " where\n"
-  tell $ "    show = text\n"
+  tell $ "    show t = if type' t == " ++ eofTypeName ++ " then \"\" else text t\n"
 
 tokenTypeShowInstance ∷ Generator ()
 tokenTypeShowInstance = do
@@ -99,6 +104,10 @@ astDatatype ∷ Generator ()
 astDatatype = do
   pdn ← astDatatypeName
   tell $ "data " ++ pdn ++ " = " ++ pdn ++ "Nonterm String [" ++ pdn ++ "] | " ++ pdn ++ "Term String deriving Show\n"
+  tell $ "\n"
+  tell $ "nodeText :: " ++ pdn ++ " -> String\n"
+  tell $ "nodeText (" ++ pdn ++ "Nonterm _ ch) = concatMap nodeText ch\n"
+  tell $ "nodeText (" ++ pdn ++ "Term s) = s\n"
 
 returnDataDatatype ∷ String → Generator String
 returnDataDatatype nt = do
@@ -125,6 +134,9 @@ parserType = do
   let sdn = ptn ++ "InnerState"
   tell $ "data " ++ sdn ++ " = " ++ sdn ++ " { _input :: [" ++ tdn ++ "], " ++ sdata ++ "}\n"
   tell $ "type " ++ ptn ++ " = StateT " ++ sdn ++ " (Either String)\n"
+
+parserCustomFunctions ∷ Generator ()
+parserCustomFunctions = asks parserCustom >>= tell
 
 -- Generators of parsers
 parserFunctions ∷ Generator ()
@@ -159,13 +171,19 @@ parserMainCaseSwitch nonterm = do
 
   let fname = "parse_" ++ nonterm
       rules = combs prule
-      retVals = returnVals prule
-      addDataAssigns = map (\(p, _) → nonterm ++ "_" ++ p ++ " = _" ++ p) retVals
-      addDataSet = if length retVals ≢ 0 then " { " ++ intercalate ", " addDataAssigns ++ " }" else ""
-      retDataStruct = addDataType ++ addDataSet
 
-  tell $ fname ++ " :: " ++ ptn ++ " (" ++ addDataType ++ ", " ++ atn ++ ")\n"
-  tell $ fname ++ " = do\n"
+  let tParams         = takenParams prule
+      funcParamsTypes = concatMap (\(_, t) → t ++ " -> ") tParams
+      funcParamsVals  = intercalate " " $ map (\(p, _) → "_param_" ++ p) tParams
+
+  let retVals        = returnVals prule
+      addDataAssigns = map (\(p, _) → nonterm ++ "_" ++ p ++ " = _" ++ p) retVals
+      addDataSet     = if length retVals ≢ 0 then " { " ++ intercalate ", " addDataAssigns ++ " }" else ""
+      retDataStruct  = addDataType ++ addDataSet
+
+  tell $ fname ++ " :: " ++ funcParamsTypes ++ ptn ++ " (" ++ addDataType ++ ", " ++ atn ++ ")\n"
+  tell $ fname ++ " " ++ funcParamsVals ++ " = do\n"
+  -- tell $ "    traceM \"" ++ fname ++ "\\n\"\n"
   tell $ "    curt <- curToken\n"
   tell $ "    (addData, children) <- switchCase curt\n"
   tell $ "    return (addData, " ++ atn ++ "Nonterm \"" ++ nonterm ++ "\" children)\n"
@@ -180,11 +198,11 @@ parserMainCaseSwitch nonterm = do
 
       let enumeratedRules = zip [0..] rule
           actionSequence = map makeAction enumeratedRules
-          makeAction (i, (Nonterminal nt)) = "(_" ++ nt ++ ", _node" ++ show i ++ ") <- parse_" ++ nt ++ "\n"
+          makeAction (i, (Nonterminal nt params)) = "(_" ++ nt ++ ", _node" ++ show i ++ ") <- parse_" ++ nt ++ prepareParams params ++ "\n"
           makeAction (i, (Terminal lid)) = let constr = getTokenTypeConstructor pname lid
-                                           in "(_" ++ lid ++ "_text, _node" ++ show i ++ ") <- do { "
-                                                  ++ "tok <- consumeToken " ++ constr ++ "; return (text tok, " ++ atn ++ "Term (text tok)) }\n"
-          makeAction (_, (Action s)) = trim (prepareCode s) ++ "\n"
+                                           in "(_token_" ++ lid ++ ", _node" ++ show i ++ ") <- do { "
+                                                  ++ "tok <- consumeToken " ++ constr ++ "; return (tok, " ++ atn ++ "Term (text tok)) }\n"
+          makeAction (_, (Action s)) = prepareCode s ++ "\n"
           returnNodesList = map (\(i, _) → "_node" ++ show i) $ filter (not ∘ isAction ∘ snd) enumeratedRules
 
       forM_ (map (tabulate 16) actionSequence) tell
@@ -199,20 +217,32 @@ parserMainCaseSwitch nonterm = do
           actions = filter isAction rule
 
       tell $ tabulate 12 "| type' curt `elem` [" ++ (intercalate ", " constrs) ++ "] = do\n"
-      forM_ actions $ \(Action s) → tell $ tabulate 16 $ trim (prepareCode s) ++ "\n"
+      forM_ actions $ \(Action s) → tell $ tabulate 16 $ prepareCode s ++ "\n"
       tell $ tabulate 16 $ "return (" ++ retDataStruct ++ ", [" ++ atn ++ "Term \"EPSILON\"])\n"
     Nothing → return ()
 
   tell $ tabulate 12 "| otherwise = lift $ Left (\"unexpected char `\" ++ show curt ++ \"`\")\n"
 
+prepareParams ∷ Maybe String → String
+prepareParams Nothing = ""
+prepareParams (Just s) = " " ++ replaceVars (trim s)
+
 prepareCode ∷ String → String
-prepareCode = replaceTokenVars ∘ replaceOwnVars ∘ replaceChildVars
-    where ownVarRegexp       = mkRegex "\\$([a-z][a-zA-Z0-9_]*)"
+prepareCode = makeLines ∘ replaceVars
+    where makeLines = unlines ∘ tabulateTail ∘ filter (not ∘ null) ∘ map trim ∘ splitOneOf ";\n"
+          tabulateTail [] = []
+          tabulateTail (s:ss) = s : map (tabulate 16) ss
+
+replaceVars ∷ String → String
+replaceVars = replaceTokenVars ∘ replaceOwnVars ∘ replaceChildVars ∘ replaceParamVars
+    where paramVarRegexp     = mkRegex "\\$#([a-z][a-zA-Z0-9_]*)"
+          replaceParamVars s = subRegex paramVarRegexp s "_param_\\1"
+          ownVarRegexp       = mkRegex "\\$([a-z][a-zA-Z0-9_]*)"
           replaceOwnVars s   = subRegex ownVarRegexp s "_\\1"
           childVarRegexp     = mkRegex "\\$([a-z][a-zA-Z0-9_]*)\\.([a-z][a-zA-Z0-9_]*)"
           replaceChildVars s = subRegex childVarRegexp s "(\\1_\\2 _\\1)"
-          tokenVarsRegexp    = mkRegex "\\$([A-Z][a-zA-Z0-9_]*)\\.([a-z][a-zA-Z0-9_]*)"
-          replaceTokenVars s = subRegex tokenVarsRegexp s "_\\1_\\2"
+          tokenVarsRegexp    = mkRegex "\\$([A-Z][a-zA-Z0-9_]*)(\\.([a-z][a-zA-Z0-9_]*))?"
+          replaceTokenVars s = subRegex tokenVarsRegexp s "(\\3 _token_\\1)"
 
 allCaseSwitches ∷ Generator ()
 allCaseSwitches = do
@@ -223,6 +253,9 @@ lexerFunction ∷ Generator ()
 lexerFunction = do
   pname ← asks parserName
   tdn   ← tokenDatatypeName
+  tell $ "runLexer :: String -> Maybe ([" ++ tdn ++ "], [" ++ tdn ++ "])\n"
+  tell $ "runLexer s = runLexer_ s 0\n"
+  tell $ "\n"
   tell $ "maybeLength :: Maybe " ++ tdn ++ " -> Int\n"
   tell $ "maybeLength Nothing = 0\n"
   tell $ "maybeLength (Just tok) = length (text tok)\n"
@@ -230,60 +263,60 @@ lexerFunction = do
   tell $ "getLongest :: [Maybe " ++ tdn ++ "] -> Maybe " ++ tdn ++ "\n"
   tell $ "getLongest = maximumBy (comparing maybeLength)\n"
   tell $ "\n"
-  tell $ "runLexer :: String -> Maybe ([" ++ tdn ++ "], [" ++ tdn ++ "])\n"
-  tell $ "runLexer [] = Just ([" ++ tdn ++ " \"$\" " ++ getTokenTypeConstructor pname "$" ++ "], [])\n"
-  tell $ "runLexer s = do\n"
-  tell $ "  case hiddenMatch s of\n"
-  tell $ "    Just tok -> do { (main, hid) <- runLexer (drop (length (text tok)) s); return (main, tok : hid) }\n"
+  tell $ "runLexer_ :: String -> Int -> Maybe ([" ++ tdn ++ "], [" ++ tdn ++ "])\n"
+  tell $ "runLexer_ [] n = Just ([" ++ tdn ++ " \"$\" n " ++ getTokenTypeConstructor pname "$" ++ "], [])\n"
+  tell $ "runLexer_ s n = do\n"
+  tell $ "  case hiddenMatch s n of\n"
+  tell $ "    Just tok -> do { (main, hid) <- runLexer_ (drop (length (text tok)) s) (n + 1); return (main, tok : hid) }\n"
   tell $ "    Nothing -> do\n"
-  tell $ "      longest <- getLongest (matchStr s ++ matchRegex s)\n"
-  tell $ "      (main, hid) <- runLexer (drop (length (text longest)) s)\n"
+  tell $ "      longest <- getLongest (matchRegex s n ++ matchStr s n)\n"
+  tell $ "      (main, hid) <- runLexer_ (drop (length (text longest)) s) (n + 1)\n"
   tell $ "      return (longest : main, hid)\n"
   tell $ "\n"
-  tell $ "matchStr :: String -> [Maybe " ++ tdn ++ "]\n"
-  tell $ "matchStr s = [ "
+  tell $ "matchStr :: String -> Int -> [Maybe " ++ tdn ++ "]\n"
+  tell $ "matchStr s n = [ "
 
   lgr ← asks lGrammar
   let mainStrToks = takeStrTokens $ takeMain lgr
       matchings   = map makeStrMatch mainStrToks
 
       makeStrMatch (lid, str) = "stripPrefix \"" ++ str ++ "\" s >> return (" ++
-                                tdn ++ " \"" ++ str ++  "\" " ++ getTokenTypeConstructor pname lid ++ ")"
+                                tdn ++ " \"" ++ str ++  "\" n " ++ getTokenTypeConstructor pname lid ++ ")"
 
-  tell $ intercalate "\n             , " matchings
-  tell $ "\n             ]\n\n"
+  tell $ intercalate "\n               , " matchings
+  tell $ "\n               ]\n\n"
 
-  tell $ "matchRegex :: String -> [Maybe " ++ tdn ++ "]\n"
-  tell $ "matchRegex s = [ "
+  tell $ "matchRegex :: String -> Int -> [Maybe " ++ tdn ++ "]\n"
+  tell $ "matchRegex s n = [ "
 
   let mainRegexToks = takeRegexTokens $ takeMain lgr
       matchings     = map makeRegexMatch mainRegexToks
       makeRegexMatch (lid, rgx) = "let (b, m, _) = s =~ \"" ++ rgx ++ "\" :: (String, String, String) in " ++
                                   "if length b /= 0 then Nothing else Just (" ++
-                                  tdn ++ " m " ++ getTokenTypeConstructor pname lid ++ ")"
+                                  tdn ++ " m n " ++ getTokenTypeConstructor pname lid ++ ")"
 
-  tell $ intercalate "\n               , " matchings
-  tell $ "\n               ]\n\n"
+  tell $ intercalate "\n                 , " matchings
+  tell $ "\n                 ]\n\n"
 
-  tell $ "hiddenMatch :: String -> Maybe " ++ tdn ++ "\n"
-  tell $ "hiddenMatch s = getLongest (hiddenMatchStr s ++ hiddenMatchRegex s)\n\n"
-  tell $ "hiddenMatchStr :: String -> [Maybe " ++ tdn ++ "]\n"
-  tell $ "hiddenMatchStr s = [ "
+  tell $ "hiddenMatch :: String -> Int -> Maybe " ++ tdn ++ "\n"
+  tell $ "hiddenMatch s n = getLongest (hiddenMatchRegex s n ++ hiddenMatchStr s n)\n\n"
+  tell $ "hiddenMatchStr :: String -> Int -> [Maybe " ++ tdn ++ "]\n"
+  tell $ "hiddenMatchStr s n = [ "
 
   let hiddenStrToks = takeStrTokens $ takeHidden lgr
       matchings     = map makeStrMatch hiddenStrToks
 
-  tell $ intercalate "\n                   , " matchings
-  tell $ "\n                   ]\n\n"
+  tell $ intercalate "\n                     , " matchings
+  tell $ "\n                     ]\n\n"
 
-  tell $ "hiddenMatchRegex :: String -> [Maybe " ++ tdn ++ "]\n"
-  tell $ "hiddenMatchRegex s = [ "
+  tell $ "hiddenMatchRegex :: String -> Int -> [Maybe " ++ tdn ++ "]\n"
+  tell $ "hiddenMatchRegex s n = [ "
 
   let hiddenRegexToks = takeRegexTokens $ takeHidden lgr
       matchings     = map makeRegexMatch hiddenRegexToks
 
-  tell $ intercalate "\n                     , " matchings
-  tell $ "\n                     ]\n"
+  tell $ intercalate "\n                       , " matchings
+  tell $ "\n                       ]\n"
 
 
 unwrapChan ∷ (LexemeId, AnnotatedLexeme) → (LexemeId, Lexeme)
@@ -323,6 +356,7 @@ allSource = sequence_ $ intersperse (tell "\n")
   , astDatatype
   , returnDataDatatypes
   , parserType
+  , parserCustomFunctions
   , parserFunctions
   , lexerFunction
   , allCaseSwitches

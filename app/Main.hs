@@ -14,11 +14,12 @@ import Filesystem.Path.CurrentOS
 
 generateParser ∷ String → String → Either String String
 generateParser pname input = do
-  (header, stateData, pgr, lgr) ← mapLeft show $ runLexer input >>= parseGrammarFile
+  (header, stateData, custom, pgr, lgr) ← mapLeft show $ runLexer input >>= parseGrammarFile
   (pgr', first, follow) ← processGrammar pgr
   let config = GC { parserName   = pname
                   , parserHeader = header
                   , parserState  = stateData
+                  , parserCustom = custom
                   , pGrammar     = pgr'
                   , lGrammar     = lgr
                   , gFIRST       = first

@@ -24,6 +24,7 @@ library
                      , MissingH
                      , regex-posix
                      , regex-compat
+                     , split
   default-language:    Haskell2010
 
 executable parser-gen-exe

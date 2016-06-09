@@ -2,5 +2,10 @@
 *.o
 *.hi
 variables
+obfuscation
 expressions
 *Parser.hs
+test/*
+!test/*.hs
+!test/fib.c
+!test/pascal.c

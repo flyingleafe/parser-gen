@@ -1,0 +1,498 @@
+header {
+import qualified Data.Map as M
+import Control.Applicative
+import Data.Bits
+
+type Scope = M.Map String (String, String)
+type ScopeStack = [Scope]
+
+data TokenRewriterAction = Replace { index :: Int, txt :: String }
+                           
+type TokenRewriter = [TokenRewriterAction]
+
+}
+
+stateData { scopes :: ScopeStack, genNum :: Int, tokenRewriter :: TokenRewriter }
+
+custom {
+
+replaceToken :: ObfuscationLexerToken -> String -> ObfuscationParser ()
+replaceToken tok s = modify $ \st -> st { tokenRewriter = replace' (tokenRewriter st) }
+    where replace' rewriter = Replace (_index tok) s : rewriter
+
+pushScope, popScope :: ObfuscationParser ()
+pushScope = modify $ \st -> st { scopes = M.empty : scopes st }
+popScope  = modify $ \st -> st { scopes = tail (scopes st) }
+
+getKey :: String -> ObfuscationParser (Maybe (String, String))
+getKey key = do
+  scp <- gets scopes
+  return $ gk scp
+    where gk [] = Nothing
+          gk (m : ms) = M.lookup key m <|> gk ms
+
+putKey :: String -> String -> String -> ObfuscationParser ()
+putKey name tp key = modify $ \st -> st { scopes = pk (scopes st) }
+    where pk (m : ms) = M.insert name (tp, key) m : ms
+
+obfuscateIdentifier :: ObfuscationLexerToken -> ObfuscationParser ()
+obfuscateIdentifier tok = do
+  let name = text tok
+  mbEntry <- getKey name
+  case mbEntry of
+    Nothing -> return ()
+    Just (_, key) -> replaceToken tok key
+
+obfuscateToken :: ObfuscationLexerToken -> String -> ObfuscationParser ()
+obfuscateToken tok typename = do
+  let name = text tok
+  if name == "main" then return ()
+  else do
+    key <- obfuscate name typename
+    replaceToken tok key
+
+obfuscate :: String -> String -> ObfuscationParser String
+obfuscate name tp = do
+  mbEntry <- getKey name
+  case mbEntry of
+    Just (_, key) -> return key
+    Nothing -> do
+      key <- nextObfuscatedKey
+      putKey name tp key
+      return key
+
+zeroKey = "IOIOIOIOIOI"
+
+mapKey :: Int -> String
+mapKey n = snd $ foldl changeBit (n, "") zeroKey
+    where changeBit (n, l) c = let c' = if n .&. 1 == 1 then toDig c else c
+                               in (shift n (-1), c' : l)
+          toDig 'O' = '0'
+          toDig 'I' = '1'
+
+nextObfuscatedKey :: ObfuscationParser String
+nextObfuscatedKey = do
+  curNum <- gets genNum
+  modify $ \st -> st { genNum = genNum st + 1 } 
+
+  return $ mapKey curNum
+
+}
+
+// Parser
+
+start
+    : translationUnit
+    ;
+
+// Expressions
+
+primaryExpression
+    :   constant
+    |   IDENTIFIER identifierExpression($IDENTIFIER)
+    |   '(' expression ')'
+    ;
+
+identifierExpression [ident :: ObfuscationLexerToken]
+    : '(' argumentExpressionList_Optional ')' { obfuscateIdentifier $#ident }
+    | EPSILON { obfuscateIdentifier $#ident }
+    ;
+
+postfixExpression
+    :   primaryExpression postfixOperatorSequence
+    ;
+
+postfixOperatorSequence
+    : postfixOperator postfixOperatorSequence
+    | EPSILON
+    ;
+
+postfixOperator
+    : '[' expression ']'
+    | '++'
+    | '--'
+    ;
+
+argumentExpressionList
+    :   assignmentExpression argumentExpressionList_Cont
+    ;
+
+argumentExpressionList_Cont
+    :   ',' argumentExpressionList
+    |   EPSILON
+    ;
+
+argumentExpressionList_Optional
+    :   argumentExpressionList
+    |   EPSILON
+    ;
+
+unaryExpression
+    :   postfixExpression
+    |   unaryOperator unaryExpression
+    |   'sizeof' unaryExpression
+    ;
+
+unaryOperator
+    :   '&' | '*' | '+' | '-' | '~' | '!' | '++' | '--'
+    ;
+
+multiplicativeExpression
+    :   unaryExpression multiplicativeExpression_Cont
+    ;
+
+multiplicativeExpression_Cont
+    :   '*' multiplicativeExpression
+    |   '/' multiplicativeExpression
+    |   '%' multiplicativeExpression
+    |   EPSILON
+    ;
+
+additiveExpression
+    :   multiplicativeExpression additiveExpression_Cont
+    ;
+
+additiveExpression_Cont
+    :   '+' additiveExpression
+    |   '-' additiveExpression
+    |   EPSILON
+    ;
+
+shiftExpression
+    :   additiveExpression shiftExpression_Cont
+    ;
+
+shiftExpression_Cont
+    :   '<<' shiftExpression
+    |   '>>' shiftExpression
+    |   EPSILON
+    ;
+
+relationalExpression
+    :   shiftExpression relationalExpression_Cont
+    ;
+
+relationalExpression_Cont
+    :   '<' relationalExpression
+    |   '>' relationalExpression
+    |   '<=' relationalExpression
+    |   '>=' relationalExpression 
+    |   EPSILON
+    ;
+
+equalityExpression
+    :   relationalExpression equalityExpression_Cont
+    ;
+
+equalityExpression_Cont
+    : '==' equalityExpression
+    | '!=' equalityExpression
+    | EPSILON
+    ;
+
+andExpression
+    :   equalityExpression andExpression_Cont
+    ;
+
+andExpression_Cont
+    : '&' andExpression
+    | EPSILON
+    ;
+
+exclusiveOrExpression
+    :   andExpression exclusiveOrExpression_Cont
+    ;
+
+exclusiveOrExpression_Cont
+    : '^' exclusiveOrExpression
+    | EPSILON
+    ;
+
+inclusiveOrExpression
+    :   exclusiveOrExpression inclusiveOrExpression_Cont
+    ;
+    
+inclusiveOrExpression_Cont
+    : '|' inclusiveOrExpression
+    | EPSILON
+    ;
+
+logicalAndExpression
+    :   inclusiveOrExpression logicalAndExpression_Cont
+    ;
+
+logicalAndExpression_Cont
+    : '&&' logicalAndExpression
+    | EPSILON
+    ;
+
+logicalOrExpression
+    :   logicalAndExpression logicalOrExpression_Cont
+    ;
+
+logicalOrExpression_Cont
+    : '||' logicalOrExpression
+    | EPSILON
+    ;
+
+conditionalExpression
+    :   logicalOrExpression conditionalExpression_Cont
+    ;
+
+conditionalExpression_Cont
+    :   '?' expression ':' conditionalExpression
+    |   EPSILON
+    ;
+
+cuttedConditionalExpression
+    : '?' expression ':' conditionalExpression
+    | anyExpressionOperator conditionalExpression
+    | EPSILON
+    ;
+
+anyExpressionOperator
+    : '||' 
+    | '&&'
+    | '|'
+    | '^'
+    | '&'
+    | '=='
+    | '!='
+    | '<'
+    | '>'
+    | '<='
+    | '>='
+    | '<<'
+    | '>>'
+    | '+' 
+    | '-'
+    | '*'
+    | '/'
+    | '%'
+    ;
+
+assignmentExpression
+    :   unaryExpression assignmentExpression_Cont
+    ;
+
+assignmentExpression_Cont
+    :   assignmentOperator assignmentExpression
+    |   cuttedConditionalExpression
+    ;
+
+assignmentOperator
+    :   '=' | '*=' | '/=' | '%=' | '+=' | '-=' | '<<=' | '>>=' | '&=' | '^=' | '|='
+    ;
+
+expression
+    :   assignmentExpression expression_Cont
+    ;
+
+expression_Cont
+    : ',' expression
+    | EPSILON
+    ;
+
+constantExpression
+    :   conditionalExpression
+    ;
+
+// Declarations
+
+declaration
+    :   typeSpecifier { let curTypename = nodeText $node0 }
+        declarator( curTypename )
+        declarationTail( curTypename ) 
+    ;
+
+declarationTail [typename :: String]
+    :  initialization_Optional initDeclaratorList_Cont($#typename) ';'
+    ;
+
+initDeclaratorList [typename :: String]
+    :   initDeclarator($#typename) initDeclaratorList_Cont($#typename)
+    ;
+
+initDeclaratorList_Cont [typename :: String]
+    :   ',' initDeclarator($#typename) initDeclaratorList_Cont($#typename)
+    |   EPSILON
+    ;
+
+initDeclarator [typename :: String]
+    : declarator($#typename) initialization_Optional
+    ;
+
+initialization_Optional
+    : '=' initializer
+    | EPSILON
+    ;
+
+typeSpecifier
+    :   'void'
+    |   'char'
+    |   'short'
+    |   'int'
+    |   'long'
+    |   'float'
+    |   'double'
+    |   'signed'
+    |   'unsigned'
+    ;
+
+declarator [typename :: String]
+    :   pointer_Optional directDeclarator
+        { let pointerStars = nodeText $node0
+          obfuscateToken $directDeclarator.tok ($#typename ++ pointerStars)
+        }
+    ;
+
+directDeclarator -> [tok :: ObfuscationLexerToken]
+    :   IDENTIFIER       { let $tok = $IDENTIFIER }
+    ;
+
+pointer
+    :   '*' pointer_Optional
+    ;
+
+pointer_Optional
+    :   '*' pointer_Optional
+    |   EPSILON
+    ;
+
+parameterTypeList
+    :   parameterList
+    ;
+
+parameterTypeList_Optional
+    : parameterTypeList
+    | EPSILON
+    ;
+
+parameterList
+    :   parameterDeclaration parameterList_Cont
+    ;
+
+parameterList_Cont
+    :   ',' parameterList
+    |   EPSILON
+    ;
+
+parameterDeclaration
+    :   typeSpecifier declarator( (nodeText $node0) )
+    ;
+
+initializer
+    :   assignmentExpression
+    ;
+
+constant
+    : INT_LITERAL
+    | STRING_LITERAL
+    | CHAR_LITERAL
+    ;
+
+// Statements
+
+statement
+    :   labeledStatement
+    |   compoundStatement
+    |   expressionStatement
+    |   selectionStatement
+    |   iterationStatement
+    |   jumpStatement
+    ;
+
+nonSelectionStatement
+    : compoundStatement
+    | expressionStatement
+    | jumpStatement
+    ;
+
+labeledStatement
+    :   'case' constantExpression ':' statement
+    |   'default' ':' statement
+    ;
+
+compoundStatement
+    :   '{'               { pushScope }
+        blockItemList
+        '}'               { popScope }
+    ;
+
+blockItemList
+    :   blockItem blockItemList
+    |   EPSILON
+    ;
+
+blockItem
+    :   declaration
+    |   statement
+    ;
+
+expressionStatement
+    :   expression_Optional ';' { -- randomMixAfter($semicolon); }
+    ;
+
+selectionStatement
+    :   'if' '(' expression ')' nonSelectionStatement elseStatement
+    |   'switch' '(' expression ')' statement
+    ;
+
+elseStatement
+    :   'else' statement
+    |   EPSILON
+    ;
+
+iterationStatement
+    :   'while' '(' expression ')' statement
+    |   'do' statement 'while' '(' expression ')' ';'
+    |   'for' '(' expression_Optional ';' expression_Optional ';' expression_Optional ')' statement
+    ;
+
+jumpStatement
+    :   'continue' ';'
+    |   'break' ';'
+    |   'return' expression_Optional ';'
+    ;
+
+expression_Optional
+    :    expression
+    |    EPSILON
+    ;
+
+translationUnit
+    :   externalDeclaration translationUnit_Cont
+    ;
+
+translationUnit_Cont
+    :   externalDeclaration translationUnit_Cont
+    |   EPSILON
+    ;
+
+externalDeclaration
+    :   typeSpecifier { let currentTypename = nodeText $node0 }
+        declarator( currentTypename )
+        externalDeclarationTail( currentTypename )
+    ;
+
+externalDeclarationTail [typename :: String]
+    :   declarationTail($#typename)
+    |   functionDefinitionTail
+    ;
+
+functionDefinitionTail
+    :   '(' parameterTypeList_Optional ')' compoundStatement
+    ;
+
+// Lexer
+
+IDENTIFIER : /[a-zA-Z_][a-zA-Z0-9_]*/ ;
+INT_LITERAL : /[0-9]+/ ;
+
+STRING_LITERAL : /\"[^\"\r\n]*\"/ ;
+CHAR_LITERAL : /'[^'\\\r\n]'/ ;
+
+WHITESPACE : HIDDEN /[ \r\n\r\f]+/ ;
+LINE_COMMENT : HIDDEN /\/\/[^\r\n]*/ ;
+// BLOCK_COMMENT : HIDDEN /\/\\\\*.*?\\\\*\// ;
+PREPROCESSOR_DIRECTIVE : HIDDEN /#[^\r\n]*/ ;
