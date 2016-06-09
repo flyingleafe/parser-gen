@@ -14,7 +14,7 @@ import Data.List.Unicode
 import Data.List.Split
 import Data.Either.Utils
 import Data.Maybe
-import Data.Char (isSpace)
+import Data.Char (isSpace, isUpper)
 import Text.Regex
 
 import Grammar
@@ -107,7 +107,7 @@ astDatatype = do
   tell $ "\n"
   tell $ "nodeText :: " ++ pdn ++ " -> String\n"
   tell $ "nodeText (" ++ pdn ++ "Nonterm _ ch) = concatMap nodeText ch\n"
-  tell $ "nodeText (" ++ pdn ++ "Term s) = s\n"
+  tell $ "nodeText (" ++ pdn ++ "Term s) = if s == \"EPSILON\" then \"\" else s\n"
 
 returnDataDatatype ∷ String → Generator String
 returnDataDatatype nt = do
@@ -200,9 +200,10 @@ parserMainCaseSwitch nonterm = do
           actionSequence = map makeAction enumeratedRules
           makeAction (i, (Nonterminal nt params)) = "(_" ++ nt ++ ", _node" ++ show i ++ ") <- parse_" ++ nt ++ prepareParams params ++ "\n"
           makeAction (i, (Terminal lid)) = let constr = getTokenTypeConstructor pname lid
-                                           in "(_token_" ++ lid ++ ", _node" ++ show i ++ ") <- do { "
+                                           in "(_token_" ++ tokName i lid ++ ", _node" ++ show i ++ ") <- do { "
                                                   ++ "tok <- consumeToken " ++ constr ++ "; return (tok, " ++ atn ++ "Term (text tok)) }\n"
           makeAction (_, (Action s)) = prepareCode s ++ "\n"
+          tokName i lid = if isUpper (head lid) then lid else "TOK" ++ show i
           returnNodesList = map (\(i, _) → "_node" ++ show i) $ filter (not ∘ isAction ∘ snd) enumeratedRules
 
       forM_ (map (tabulate 16) actionSequence) tell

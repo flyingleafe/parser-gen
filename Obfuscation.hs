@@ -5,6 +5,7 @@ import Data.List
 import Data.Ord
 import Control.Monad.State
 import System.IO
+import Data.Time.Clock.POSIX
 import ObfuscationParser
 import qualified Data.Map as M
 
@@ -14,14 +15,6 @@ class ToTree a where
 instance ToTree ObfuscationParserASTNode where
     toTree (ObfuscationParserASTNodeNonterm s chs) = Node s $ map toTree chs
     toTree (ObfuscationParserASTNodeTerm s) = Node s []
-
-initState :: ObfuscationParserInnerState
-initState = ObfuscationParserInnerState
-            { _input = []
-            , scopes = [M.empty]
-            , genNum = 0
-            , tokenRewriter = []
-            }
 
 writeTokens :: [ObfuscationLexerToken] -> IO ()
 writeTokens = mapM_ (putStr . show)
@@ -35,6 +28,7 @@ rewriteTokens (t : ts) (a : as) = do
   if cur < toRewrite then putStr (show t) >> rewriteTokens ts (a : as)
   else case a of
          Replace _ str -> putStr str >> rewriteTokens ts as
+         InsertAfter _ str -> putStr (show t) >> putStr str >> rewriteTokens ts as
 
 zipStreams :: [ObfuscationLexerToken] -> [ObfuscationLexerToken] -> [ObfuscationLexerToken]
 zipStreams [] ts = ts
@@ -46,9 +40,10 @@ zipStreams (a : as) (b : bs) = if _index a < _index b
 main :: IO ()
 main = do
   input <- getContents
+  time <- (fromInteger . round) <$> getPOSIXTime
   case runLexer input of
     Nothing -> putStrLn "Lexer error"
     Just (mainch, hidch) -> do
-      case runStateT parse_start (initState { _input = mainch }) of
+      case runStateT parse_start (initState time mainch) of
         Left err -> putStrLn err
         Right (_, st) -> rewriteTokens (zipStreams mainch hidch) $ sortBy (comparing index) $ tokenRewriter st

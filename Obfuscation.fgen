@@ -2,23 +2,46 @@ header {
 import qualified Data.Map as M
 import Control.Applicative
 import Data.Bits
+import Data.Maybe
+import System.Random
 
 type Scope = M.Map String (String, String)
 type ScopeStack = [Scope]
 
 data TokenRewriterAction = Replace { index :: Int, txt :: String }
-                           
+                         | InsertAfter { index :: Int, txt :: String }
+
 type TokenRewriter = [TokenRewriterAction]
 
 }
 
-stateData { scopes :: ScopeStack, genNum :: Int, tokenRewriter :: TokenRewriter }
+stateData { scopes :: ScopeStack, genNum :: Int, tokenRewriter :: TokenRewriter, randomStream :: [Double] }
 
 custom {
 
+initState :: Int -> [ObfuscationLexerToken] -> ObfuscationParserInnerState
+initState seed toks = ObfuscationParserInnerState
+                      { _input = toks
+                      , scopes = [M.empty]
+                      , genNum = 0
+                      , tokenRewriter = []
+                      , randomStream = randomRs (0.0, 1.0) (mkStdGen seed)  
+                      }
+
+nextRand :: ObfuscationParser Double
+nextRand = do
+  res <- gets (head . randomStream)
+  modify $ \st -> st { randomStream = tail (randomStream st) }
+  return res
+
+addToRewriter :: TokenRewriterAction -> ObfuscationParser ()
+addToRewriter act = modify $ \st -> st { tokenRewriter = act : (tokenRewriter st) }
+
 replaceToken :: ObfuscationLexerToken -> String -> ObfuscationParser ()
-replaceToken tok s = modify $ \st -> st { tokenRewriter = replace' (tokenRewriter st) }
-    where replace' rewriter = Replace (_index tok) s : rewriter
+replaceToken tok s = addToRewriter $ Replace (_index tok) s
+
+insertAfterToken :: ObfuscationLexerToken -> String -> ObfuscationParser ()
+insertAfterToken tok s = addToRewriter $ InsertAfter (_index tok) s
 
 pushScope, popScope :: ObfuscationParser ()
 pushScope = modify $ \st -> st { scopes = M.empty : scopes st }
@@ -35,6 +58,34 @@ putKey :: String -> String -> String -> ObfuscationParser ()
 putKey name tp key = modify $ \st -> st { scopes = pk (scopes st) }
     where pk (m : ms) = M.insert name (tp, key) m : ms
 
+randomMixAfter :: ObfuscationLexerToken -> ObfuscationParser ()
+randomMixAfter tok = do
+  rnd <- nextRand
+  if rnd < 0.5 then return ()
+  else do
+    let isNotFunc (_, (tp, _)) = tp /= "function"
+    lastScope <- gets (filter isNotFunc . M.toList . head . scopes)
+    let vars = map fst lastScope
+        vsize = toInteger $ length vars
+    if vsize == 0 then return ()
+    else do
+      didx <- nextRand
+      let idx = fromInteger $ round (fromInteger vsize * didx) `mod` vsize
+          var = vars !! idx
+          (tp, key) = fromJust $ lookup var lastScope
+      newKey <- nextObfuscatedKey
+      let decl = tp ++ " " ++ newKey ++ " = " ++ key ++ ";"
+      putKey var tp key
+      insertAfterToken tok decl
+     
+
+markAsFunction :: String -> ObfuscationParser ()
+markAsFunction name = do
+  mbEntry <- getKey name
+  case mbEntry of
+    Nothing -> return ()
+    Just (tp, key) -> putKey name "function" key
+  
 obfuscateIdentifier :: ObfuscationLexerToken -> ObfuscationParser ()
 obfuscateIdentifier tok = do
   let name = text tok
@@ -82,7 +133,7 @@ nextObfuscatedKey = do
 // Parser
 
 start
-    : translationUnit
+    : translationUnit { gets scopes >>= traceShowM }
     ;
 
 // Expressions
@@ -339,10 +390,12 @@ typeSpecifier
     |   'unsigned'
     ;
 
-declarator [typename :: String]
+declarator [typename :: String] -> [name :: String]
     :   pointer_Optional directDeclarator
         { let pointerStars = nodeText $node0
-          obfuscateToken $directDeclarator.tok ($#typename ++ pointerStars)
+          let curTok = $directDeclarator.tok
+          let $name = text curTok
+          obfuscateToken curTok ($#typename ++ pointerStars)
         }
     ;
 
@@ -430,7 +483,7 @@ blockItem
     ;
 
 expressionStatement
-    :   expression_Optional ';' { -- randomMixAfter($semicolon); }
+    :   expression_Optional ';' { randomMixAfter $TOK1 }
     ;
 
 selectionStatement
@@ -472,12 +525,12 @@ translationUnit_Cont
 externalDeclaration
     :   typeSpecifier { let currentTypename = nodeText $node0 }
         declarator( currentTypename )
-        externalDeclarationTail( currentTypename )
+        externalDeclarationTail( currentTypename $declarator.name )
     ;
 
-externalDeclarationTail [typename :: String]
+externalDeclarationTail [typename :: String, declName :: String]
     :   declarationTail($#typename)
-    |   functionDefinitionTail
+    |   functionDefinitionTail { markAsFunction $#declName }
     ;
 
 functionDefinitionTail
